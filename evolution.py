@@ -1,28 +1,66 @@
-import random
+import numpy as np
 
-class Genome:
-    def __init__(self, parent_genes=None):
-        if parent_genes is None:
-            # Random initial genes [Move_N, Move_E, Move_S, Move_W, Stay]
-            self.weights = [random.random() for _ in range(5)]
+def activation_quant_8bit(x):
+    """
+    Quantizes activations to 8-bit (-128 to 127), fitting the BitNet paradigm
+    where weights are ternary and activations are 8-bit.
+    """
+    max_val = max(np.max(np.abs(x)), 1e-5)
+    scale = 127.0 / max_val
+    return np.clip(np.round(x * scale), -128, 127).astype(np.int8)
+
+class BitNetLayer:
+    def __init__(self, in_features, out_features, weights=None):
+        if weights is None:
+            # Strict 1.58-bit ternary initialization (-1, 0, 1)
+            self.weights = np.random.choice([-1, 0, 1], size=(in_features, out_features)).astype(np.int8)
         else:
-            self.weights = list(parent_genes)
+            self.weights = weights.copy()
+            
+    def forward(self, x_quant):
+        # Native dot-product: multiplying int8 activations by ternary int8 weights
+        # Because weights are just -1, 0, 1, this represents pure additions/subtractions on hardware
+        return np.dot(x_quant, self.weights).astype(np.float32)
+
+class BitNetGenome:
+    def __init__(self, layer_sizes, parent_genes=None):
+        self.layer_sizes = layer_sizes
+        self.layers = []
+        
+        if parent_genes is None:
+            for i in range(len(layer_sizes) - 1):
+                self.layers.append(BitNetLayer(layer_sizes[i], layer_sizes[i+1]))
+        else:
+            # Inherit and reconstruct layers from parent's ternary matrices
+            for w in parent_genes:
+                self.layers.append(BitNetLayer(w.shape[0], w.shape[1], w))
             self.mutate()
             
     def mutate(self):
-        # Small mutation rate
-        mutation_chance = 0.1
-        mutation_amount = 0.1
+        # Mutate ternary weights with a small probability
+        mutation_chance = 0.05
         
-        for i in range(len(self.weights)):
-            if random.random() < mutation_chance:
-                # Add or subtract a small amount
-                change = random.uniform(-mutation_amount, mutation_amount)
-                self.weights[i] = max(0.0, self.weights[i] + change)
+        for layer in self.layers:
+            mask = np.random.rand(*layer.weights.shape) < mutation_chance
+            if np.any(mask):
+                # Flipping bits to randomly sample from -1, 0, 1
+                new_weights = np.random.choice([-1, 0, 1], size=layer.weights.shape).astype(np.int8)
+                layer.weights = np.where(mask, new_weights, layer.weights)
                 
-        # Normalize weights so they sum to 1.0 (probabilities)
-        total = sum(self.weights)
-        if total > 0:
-            self.weights = [w / total for w in self.weights]
-        else:
-            self.weights = [0.2] * 5
+    def get_genes(self):
+        return [layer.weights for layer in self.layers]
+        
+    def forward(self, x):
+        # Pass through the network
+        curr = x.astype(np.float32)
+        for i, layer in enumerate(self.layers):
+            # Quantize activations to 8-bit integers before linear projection
+            curr_quant = activation_quant_8bit(curr)
+            curr = layer.forward(curr_quant)
+            
+            # Apply non-linear ReLU if it's a hidden layer
+            if i < len(self.layers) - 1:
+                curr = np.maximum(0, curr)
+                
+        # Returns output logits (float32, to drive final probabilities)
+        return curr

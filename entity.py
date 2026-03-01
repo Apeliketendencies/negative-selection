@@ -1,5 +1,6 @@
 import random
-from evolution import Genome
+import numpy as np
+from evolution import BitNetGenome
 
 class LiminalEntity:
     def __init__(self, calories=200, genome=None):
@@ -11,21 +12,31 @@ class LiminalEntity:
         self.metabolism = 1 
         self.movement_cost = 2 
         
-        self.genome = Genome(parent_genes=genome)
+        # BitNet Architecture: 10 inputs (3x3 vision + 1 calorie scalar) -> 16 hidden -> 5 outputs (N,E,S,W,Stay)
+        layer_sizes = [10, 16, 5]
+        self.genome = BitNetGenome(layer_sizes=layer_sizes, parent_genes=genome)
         
     def act(self, environment):
         """
-        The Brainstem decision loop.
+        The Brainstem decision loop, driven by purely ternary neural network.
         """
         self.calories -= self.metabolism
         
-        # Very simple heuristic action based on genes for MVP
-        # Genome weights: [N, E, S, W, Stay]
-        action = random.choices(
-            ['N', 'E', 'S', 'W', 'Stay'], 
-            weights=self.genome.weights, 
-            k=1
-        )[0]
+        # Build neural network input state
+        vision = environment.get_local_vision(self.x, self.y, radius=1)
+        # Normalize calories to act as an internal "hunger" scalar.
+        caloric_score = self.calories / 200.0
+        
+        state = np.array(vision + [caloric_score])
+        
+        # Forward pass returning Float32 logits
+        logits = self.genome.forward(state)
+        # Softmax conversion to probability distribution
+        e_x = np.exp(logits - np.max(logits))
+        probs = e_x / e_x.sum()
+        
+        actions = ['N', 'E', 'S', 'W', 'Stay']
+        action = np.random.choice(actions, p=probs)
         
         if action != 'Stay':
             self.calories -= self.movement_cost
@@ -45,6 +56,6 @@ class LiminalEntity:
         # Asexual splitting if energy is high enough
         if self.calories > 200:
             self.calories -= 100 # Cost of splitting
-            child = LiminalEntity(calories=200, genome=self.genome.weights)
+            child = LiminalEntity(calories=200, genome=self.genome.get_genes())
             return child
         return None
